@@ -30,7 +30,29 @@ app.get('/stream', async (req, res) => {
             return res.status(400).json({ error: 'Parameter link diperlukan' });
         }
 
+        // Cari torrent berdasarkan infoHash
+        const torrent = await Torrent.findOne({
+            infoHash: link.toLocaleLowerCase(),
+            completed: true
+        });
+
         if ('preload' in req.query) {
+            if (torrent) {
+                // Jika torrent ditemukan dan complete, return JSON data
+                return res.json({
+                    status: 'success',
+                    message: 'File sudah tersedia',
+                    data: {
+                        infoHash: torrent.infoHash,
+                        fileName: torrent.fileName,
+                        filePath: torrent.filePath,
+                        name: torrent.name,
+                        completed: torrent.completed,
+                        createdAt: torrent.createdAt
+                    }
+                });
+            }
+            // Jika tidak ditemukan, redirect ke fando
             return res.redirect(`https://fando.lovelywombat.box.ca/stream?link=${link}&index=1&preload`);
         }
 
@@ -41,12 +63,6 @@ app.get('/stream', async (req, res) => {
 #EXTINF:0,${'video'}
 https://stream.fando.id/stream/video?link=${link}&index=1&play`);
         }
-
-        // Cari torrent berdasarkan infoHash
-        const torrent = await Torrent.findOne({
-            infoHash: link.toLocaleLowerCase(),
-            completed: true
-        });
 
         if (!torrent) {
             // Redirect ke fando.lovelywombat.box.ca jika torrent tidak ditemukan atau belum complete
