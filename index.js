@@ -3,6 +3,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const Torrent = require('./models/Torrent');
 const axios = require('axios');
+const stringSimilarity = require('string-similarity');
 
 const app = express();
 
@@ -10,6 +11,69 @@ const app = express();
 mongoose.connect(process.env.MONGODB_URI)
     .then(() => console.log('Terhubung ke MongoDB'))
     .catch(err => console.error('Error koneksi MongoDB:', err));
+
+let client = null;
+
+// Fungsi untuk mendapatkan info torrent dari infoHash
+async function getTorrentInfo(infoHash) {
+    if (!client) {
+        const WebTorrent = await import('webtorrent');
+        client = new WebTorrent.default();
+    }
+
+    return new Promise((resolve, reject) => {
+        client.add(infoHash, { store: false }, (torrent) => {
+            // Setelah mendapatkan info, hapus torrent dari client
+            client.remove(torrent);
+
+            // Ambil nama file terbesar (biasanya file utama)
+            const mainFile = torrent.files.reduce((a, b) => a.length > b.length ? a : b);
+            const torrentInfo = {
+                name: torrent.name,
+                fileName: mainFile.name,
+                size: torrent.length,
+                files: torrent.files.map(f => f.name)
+            };
+
+            resolve(torrentInfo);
+        });
+    });
+}
+
+// Fungsi untuk membersihkan judul
+function cleanTitle(title) {
+    return title
+        .toLowerCase()
+        .replace(/[^a-z0-9\s]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+// Fungsi untuk mencari torrent berdasarkan judul yang mirip
+async function findTorrentBySimilarTitle(title) {
+    const cleanSearchTitle = cleanTitle(title);
+
+    // Ambil semua torrent yang completed
+    const torrents = await Torrent.find({ completed: true });
+
+    // Hitung similarity score untuk setiap torrent
+    const torrentsWithScore = torrents.map(torrent => ({
+        torrent,
+        score: Math.max(
+            stringSimilarity.compareTwoStrings(cleanSearchTitle, cleanTitle(torrent.name)),
+            stringSimilarity.compareTwoStrings(cleanSearchTitle, cleanTitle(torrent.fileName))
+        )
+    }));
+
+    // Urutkan berdasarkan score tertinggi
+    torrentsWithScore.sort((a, b) => b.score - a.score);
+
+    // Ambil torrent dengan score di atas threshold
+    const threshold = 0.6;
+    return torrentsWithScore
+        .filter(item => item.score >= threshold)
+        .map(item => item.torrent);
+}
 
 // Fungsi untuk mengecek URL
 async function checkUrl(url) {
@@ -30,11 +94,30 @@ app.get('/stream', async (req, res) => {
             return res.status(400).json({ error: 'Parameter link diperlukan' });
         }
 
-        // Cari torrent berdasarkan infoHash
-        const torrent = await Torrent.findOne({
+        let torrent = null;
+
+        // Cari berdasarkan infoHash di database
+        torrent = await Torrent.findOne({
             infoHash: link.toLocaleLowerCase(),
             completed: true
         });
+
+        // Jika tidak ditemukan di database, coba dapatkan info dari WebTorrent
+        if (!torrent) {
+            try {
+                const torrentInfo = await getTorrentInfo(link);
+                console.log('Torrent info from WebTorrent:', torrentInfo);
+
+                // Cari torrent yang mirip di database
+                const similarTorrents = await findTorrentBySimilarTitle(torrentInfo.name);
+                if (similarTorrents.length > 0) {
+                    torrent = similarTorrents[0];
+                    console.log(`Found similar torrent: ${torrent.name}`);
+                }
+            } catch (error) {
+                console.error('Error getting torrent info:', error);
+            }
+        }
 
         if ('preload' in req.query) {
             if (torrent) {
